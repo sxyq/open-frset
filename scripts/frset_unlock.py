@@ -74,6 +74,23 @@ TAB_REMOVAL_MARKERS = {
     0x100c81c80: ("0002030405000000", 8),   # 数组2 元素（无 .pro）
 }
 
+# 钥匙串中和补丁（2026-10-14 追加，补丁 J）：
+# App 启动时确保设备锚点 genp/com.maoux.frset.anchor/primary_token 存在（读→建→写），
+# 其 ACL 绑定签名指纹——每次 ad-hoc 重签后 ACL 不匹配 → 弹窗；无人响应时读失败 →
+# 高频重试 → SIGBUS 崩溃（均已实证）。
+# 根治：读写两头+更新全部中和，App 全程零 keychain 交互（与签名无关，任何构建永久生效）：
+#   0x100785e58: bl _SecItemCopyMatching → movn w0,#0x62d4（永远返回 errSecItemNotFound=-25300）
+#                （后续 mov x20,x0 保留 → 读函数走 not-found 分支返回 nil，外层转创建）
+#   0x100785be0: bl _SecItemAdd          → mov w0,#0（创建永远"成功"，不实际写入）
+#                （后续 mov x23,x0 保留 → cbz w23 走成功路径）
+#   0x100786264: bl _SecItemUpdate       → mov w0,#0（更新永远"成功"）
+#                （关键：不打这条会陷入 Update-not-found 重试循环，实测 10992 次后 SIGBUS）
+KEYCHAIN_MARKERS = {
+    0x100785e58: ("605a8c12", 4),   # 读: movn w0,#0x62d3
+    0x100785be0: ("00008052", 4),   # 创建: mov w0,#0
+    0x100786264: ("00008052", 4),   # 更新: mov w0,#0
+}
+
 PRODUCT_IDS = {
     "lifetime":  "com.frset.pro.lifetime",
     "yearly":    "com.frset.pro.yearly",
@@ -309,6 +326,13 @@ def check_patched(app):
         if got != want:
             ok = False
         detail.append(f"  {mark} 0x{va:x}: 页签数组已移除 Pro" if got == want
+                      else f"  {mark} 0x{va:x}: {got} (期望 {want})")
+    for va, (want, n) in KEYCHAIN_MARKERS.items():
+        got = data[va - VADDR_BASE: va - VADDR_BASE + n].hex()
+        mark = "✓" if got == want else "✗"
+        if got != want:
+            ok = False
+        detail.append(f"  {mark} 0x{va:x}: 钥匙串访问已中和（读写均不触达 Security）" if got == want
                       else f"  {mark} 0x{va:x}: {got} (期望 {want})")
     os.remove(tmp)
     return ok, "\n".join(detail)
